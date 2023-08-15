@@ -4,8 +4,7 @@
 """ Models registries.
 
 """
-from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections import Mapping, defaultdict, deque
 from contextlib import closing, contextmanager
 from functools import partial
 from operator import attrgetter
@@ -101,7 +100,6 @@ class Registry(Mapping):
             registry._init = False
             registry.ready = True
             registry.registry_invalidated = bool(update_module)
-            registry.new = registry.init = registry.registries = None
 
         return registry
 
@@ -139,7 +137,8 @@ class Registry(Mapping):
         self.cache_sequence = None
 
         # Flags indicating invalidation of the registry or the cache.
-        self._invalidation_flags = threading.local()
+        self.registry_invalidated = False
+        self.cache_invalidated = False
 
         with closing(self.cursor()) as cr:
             has_unaccent = odoo.modules.db.has_unaccent(cr)
@@ -343,9 +342,7 @@ class Registry(Mapping):
             try:
                 func(*args, **kwargs)
             except Exception as e:
-                # warn only, this is not a deployment showstopper, and
-                # can sometimes be a transient error
-                _schema.warning(*e.args)
+                _schema.error(*e.args)
 
     def init_models(self, cr, model_names, context, install=True):
         """ Initialize a list of models (given by their name). Call methods
@@ -419,24 +416,6 @@ class Registry(Mapping):
         """
         for model in self.models.values():
             model.clear_caches()
-
-    @property
-    def registry_invalidated(self):
-        """ Determine whether the current thread has modified the registry. """
-        return getattr(self._invalidation_flags, 'registry', False)
-
-    @registry_invalidated.setter
-    def registry_invalidated(self, value):
-        self._invalidation_flags.registry = value
-
-    @property
-    def cache_invalidated(self):
-        """ Determine whether the current thread has modified the cache. """
-        return getattr(self._invalidation_flags, 'cache', False)
-
-    @cache_invalidated.setter
-    def cache_invalidated(self, value):
-        self._invalidation_flags.cache = value
 
     def setup_signaling(self):
         """ Setup the inter-process signaling on this registry. """

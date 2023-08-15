@@ -44,8 +44,8 @@ class IrTranslationImport(object):
         # Note that Postgres will NOT inherit the constraints or indexes
         # of ir_translation, so this copy will be much faster.
         query = """ CREATE TEMP TABLE %s (
-                        imd_model VARCHAR,
-                        imd_name VARCHAR,
+                        imd_model VARCHAR(64),
+                        imd_name VARCHAR(128),
                         noupdate BOOLEAN
                     ) INHERITS (%s) """ % (self._table, self._model_table)
         self._cr.execute(query)
@@ -109,11 +109,9 @@ class IrTranslationImport(object):
                            WHERE type = 'code'
                            AND noupdate IS NOT TRUE
                            ON CONFLICT (type, lang, md5(src)) WHERE type = 'code'
-                            DO UPDATE SET (name, lang, res_id, src, type, value, module, state, comments) = (EXCLUDED.name, EXCLUDED.lang, EXCLUDED.res_id, EXCLUDED.src, EXCLUDED.type, EXCLUDED.value, EXCLUDED.module, EXCLUDED.state,
-                                                                                                             CASE WHEN %s.comments = 'openerp-web' THEN 'openerp-web' ELSE EXCLUDED.comments END
-                                                                                                            )
+                            DO UPDATE SET (name, lang, res_id, src, type, value, module, state, comments) = (EXCLUDED.name, EXCLUDED.lang, EXCLUDED.res_id, EXCLUDED.src, EXCLUDED.type, EXCLUDED.value, EXCLUDED.module, EXCLUDED.state, EXCLUDED.comments)
                             WHERE EXCLUDED.value IS NOT NULL AND EXCLUDED.value != '';
-                       """ % (self._model_table, self._table, self._model_table))
+                       """ % (self._model_table, self._table))
             count += cr.rowcount
             cr.execute(""" INSERT INTO %s(name, lang, res_id, src, type, value, module, state, comments)
                            SELECT name, lang, res_id, src, type, value, module, state, comments
@@ -506,13 +504,13 @@ class IrTranslation(models.Model):
 
         # collect translated field records (model_ids) and other translations
         trans_ids = []
-        model_ids = defaultdict(set)
-        model_fields = defaultdict(set)
+        model_ids = defaultdict(list)
+        model_fields = defaultdict(list)
         for trans in self:
-            if trans.type in ('model', 'model_terms'):
+            if trans.type == 'model':
                 mname, fname = trans.name.split(',')
-                model_ids[mname].add(trans.res_id)
-                model_fields[mname].add(fname)
+                model_ids[mname].append(trans.res_id)
+                model_fields[mname].append(fname)
             else:
                 trans_ids.append(trans.id)
 
@@ -525,13 +523,9 @@ class IrTranslation(models.Model):
         # check for read/write access on translated field records
         fmode = 'read' if mode == 'read' else 'write'
         for mname, ids in model_ids.items():
-            records = self.env[mname].browse(ids).exists()
+            records = self.env[mname].browse(ids)
             records.check_access_rights(fmode)
             records.check_field_access_rights(fmode, model_fields[mname])
-            if mode == 'create' and set(records._ids) != ids:
-                raise ValidationError(_("Creating translation on non existing records"))
-            if not records:
-                continue
             records.check_access_rule(fmode)
 
     @api.constrains('type', 'name', 'value')

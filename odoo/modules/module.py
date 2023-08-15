@@ -2,7 +2,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 import ast
-import collections.abc
+import collections
 import imp
 import importlib
 import inspect
@@ -19,7 +19,6 @@ import threading
 import warnings
 from operator import itemgetter
 from os.path import join as opj
-from pathlib import Path
 
 import odoo
 import odoo.tools as tools
@@ -159,7 +158,7 @@ def initialize_sys_path():
     legacy_upgrade_path = os.path.join(base_path, 'base', 'maintenance', 'migrations')
     for up in (tools.config['upgrade_path'] or legacy_upgrade_path).split(','):
         up = os.path.normcase(os.path.abspath(tools.ustr(up.strip())))
-        if os.path.isdir(up) and up not in upgrade.__path__:
+        if up not in upgrade.__path__:
             upgrade.__path__.append(up)
 
     # create decrecated module alias from odoo.addons.base.maintenance.migrations to odoo.upgrade
@@ -369,7 +368,7 @@ def load_information_from_description_file(module, mod_path=None):
         # auto_install: [] to always auto_install a module regardless of its
         # dependencies
         auto_install = info.get('auto_install', info.get('active', False))
-        if isinstance(auto_install, collections.abc.Iterable):
+        if isinstance(auto_install, collections.Iterable):
             info['auto_install'] = set(auto_install)
             non_dependencies = info['auto_install'].difference(info['depends'])
             assert not non_dependencies,\
@@ -473,7 +472,7 @@ def get_test_modules(module):
     except ImportError:
         pass
     else:
-        results += list(_get_upgrade_test_modules(module))
+        results += _get_tests_modules('odoo.upgrade', module)
 
     return results
 
@@ -499,18 +498,6 @@ def _get_tests_modules(path, module):
     result = [mod_obj for name, mod_obj in inspect.getmembers(mod, inspect.ismodule)
               if name.startswith('test_')]
     return result
-
-def _get_upgrade_test_modules(module):
-    upg = importlib.import_module("odoo.upgrade")
-    for path in map(Path, upg.__path__):
-        for test in (path / module / "tests").glob("test_*.py"):
-            spec = importlib.util.spec_from_file_location(f"odoo.upgrade.{module}.tests.{test.stem}", test)
-            if not spec:
-                continue
-            pymod = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = pymod
-            spec.loader.exec_module(pymod)
-            yield pymod
 
 
 class OdooTestResult(unittest.result.TestResult):
@@ -541,8 +528,6 @@ class OdooTestResult(unittest.result.TestResult):
             logger.handle(record)
 
     def getDescription(self, test):
-        if isinstance(test, unittest.case._SubTest):
-            return 'Subtest %s.%s %s' % (test.test_case.__class__.__qualname__, test.test_case._testMethodName, test._subDescription())
         if isinstance(test, unittest.TestCase):
             # since we have the module name in the logger, this will avoid to duplicate module info in log line
             # we only apply this for TestCase since we can receive error handler or other special case

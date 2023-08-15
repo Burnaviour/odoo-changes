@@ -33,8 +33,7 @@ import operator
 import pytz
 import re
 import uuid
-from collections import defaultdict, OrderedDict
-from collections.abc import MutableMapping
+from collections import defaultdict, MutableMapping, OrderedDict
 from contextlib import closing
 from inspect import getmembers, currentframe
 from operator import attrgetter, itemgetter
@@ -697,16 +696,10 @@ class BaseModel(MetaModel('DummyModel', (object,), {'_register': False})):
         cls = type(self)
         methods = defaultdict(list)
         for attr, func in getmembers(cls, is_onchange):
-            missing = []
             for name in func._onchange:
                 if name not in cls._fields:
-                    missing.append(name)
+                    _logger.warning("@onchange%r parameters must be field names", func._onchange)
                 methods[name].append(func)
-            if missing:
-                _logger.warning(
-                    "@api.onchange%r parameters must be field names -> not valid: %s",
-                    func._onchange, missing
-                )
 
         # add onchange methods to implement "change_default" on fields
         def onchange_default(field, self):
@@ -877,7 +870,7 @@ class BaseModel(MetaModel('DummyModel', (object,), {'_register': False})):
                         # a comma-separated list of xids in a single cell
                         if import_compatible and field.type == 'many2many' and len(path) > 1 and path[1] == 'id':
                             xml_ids = [xid for _, xid in value.__ensure_xml_id()]
-                            current[i] = ','.join(xml_ids)
+                            current[i] = ','.join(xml_ids) or False
                             continue
 
                         # recursively export the fields that follow name; use
@@ -893,7 +886,7 @@ class BaseModel(MetaModel('DummyModel', (object,), {'_register': False})):
                             # append the other lines at the end
                             lines += lines2[1:]
                         else:
-                            current[i] = ''
+                            current[i] = False
 
         # if any xid should be exported, only do so at toplevel
         if _is_toplevel_call and any(f[-1] == 'id' for f in fields):
@@ -2226,11 +2219,9 @@ class BaseModel(MetaModel('DummyModel', (object,), {'_register': False})):
 
         self._apply_ir_rules(query, 'read')
         for gb in groupby_fields:
-            if gb not in self._fields:
-                raise UserError(_("Unknown field %r in 'groupby'") % gb)
+            assert gb in self._fields, "Unknown field %r in 'groupby'" % gb
             gb_field = self._fields[gb].base_field
-            if not (gb_field.store and gb_field.column_type):
-                raise UserError(_("Fields in 'groupby' must be database-persisted fields (no computed fields)"))
+            assert gb_field.store and gb_field.column_type, "Fields in 'groupby' must be regular database-persisted fields (no function or related fields), or function fields with store=True"
 
         aggregated_fields = []
         select_terms = []
@@ -3135,13 +3126,14 @@ Fields:
 
         IrModelData = self.env['ir.model.data'].sudo()
         if self._log_access:
-            res = self.read(LOG_ACCESS_COLUMNS)
+            res = self.sudo().read(LOG_ACCESS_COLUMNS)
         else:
             res = [{'id': x} for x in self.ids]
         xml_data = dict((x['res_id'], x) for x in IrModelData.search_read([('model', '=', self._name),
                                                                            ('res_id', 'in', self.ids)],
                                                                           ['res_id', 'noupdate', 'module', 'name'],
-                                                                          order='id DESC'))
+                                                                          order='id',
+                                                                          limit=1))
         for r in res:
             value = xml_data.get(r['id'], {})
             r['xmlid'] = '%(module)s.%(name)s' % value if value else False
@@ -3369,7 +3361,6 @@ Fields:
             return True
 
         self.check_access_rights('unlink')
-        self.check_access_rule('unlink')
         self._check_concurrency()
 
         # mark fields that depend on 'self' to recompute them after 'self' has
@@ -3378,6 +3369,8 @@ Fields:
         self.modified(self._fields, before=True)
 
         with self.env.norecompute():
+            self.check_access_rule('unlink')
+
             cr = self._cr
             Data = self.env['ir.model.data'].sudo().with_context({})
             Defaults = self.env['ir.default'].sudo()
@@ -3570,14 +3563,6 @@ Fields:
                     protected.update(self._field_computed.get(field, [field]))
             if fname == 'company_id' or (field.relational and field.check_company):
                 check_company = True
-
-        # force the computation of fields that are computed with some assigned
-        # fields, but are not assigned themselves
-        to_compute = [field.name
-                      for field in protected
-                      if field.compute and field.name not in vals]
-        if to_compute:
-            self.recompute(to_compute, self)
 
         # protect fields being written against recomputation
         with env.protecting(protected, self):
@@ -4084,15 +4069,11 @@ Fields:
             FROM {0} node
             WHERE node.id IN %s
             AND child.parent_path LIKE concat(node.parent_path, '%%')
-            RETURNING child.id, child.parent_path
+            RETURNING child.id
         """
         cr.execute(query.format(self._table), [prefix, tuple(self.ids)])
-
-        # update the cache of updated nodes, and determine what to recompute
-        updated = dict(cr.fetchall())
-        records = self.browse(updated)
-        self.env.cache.update(records, self._fields['parent_path'], updated.values())
-        records.modified(['parent_path'])
+        modified_ids = {row[0] for row in cr.fetchall()}
+        self.browse(modified_ids).modified(['parent_path'])
 
     def _load_records_write(self, values):
         self.write(values)
@@ -4145,19 +4126,6 @@ Fields:
                 to_create.append(data)
                 continue
             d_id, d_module, d_name, d_model, d_res_id, d_noupdate, r_id = row
-            if self._name != d_model:
-                _logger.warning((
-                    "For external id %s "
-                    "when trying to create/update a record of model %s "
-                    "found record of different model %s (%s)"
-                    "\nUpdating record %s of target model %s"),
-                    xml_id, self._name, d_model, d_id, d_id, self._name
-                )
-                raise ValidationError(
-                    f"For external id {xml_id} "
-                    f"when trying to create/update a record of model {self._name} "
-                    f"found record of different model {d_model} ({d_id})"
-                )
             record = self.browse(d_res_id)
             if update and d_noupdate:
                 data['record'] = record
@@ -4797,14 +4765,11 @@ Fields:
                      { 'id': ['module.ext_id', 'module.ext_id_bis'],
                        'id2': [] }
         """
-        result = defaultdict(list)
+        result = {record.id: [] for record in self}
         domain = [('model', '=', self._name), ('res_id', 'in', self.ids)]
         for data in self.env['ir.model.data'].sudo().search_read(domain, ['module', 'name', 'res_id'], order='id'):
             result[data['res_id']].append('%(module)s.%(name)s' % data)
-        return {
-            record.id: result[record._origin.id]
-            for record in self
-        }
+        return result
 
     def get_external_id(self):
         """Retrieve the External ID of any database record, if there
@@ -6316,9 +6281,9 @@ Fields:
 
         return result
 
-collections.abc.Set.register(BaseModel)
+collections.Set.register(BaseModel)
 # not exactly true as BaseModel doesn't have __reversed__, index or count
-collections.abc.Sequence.register(BaseModel)
+collections.Sequence.register(BaseModel)
 
 class RecordCache(MutableMapping):
     """ A mapping from field names to values, to read and update the cache of a record. """
